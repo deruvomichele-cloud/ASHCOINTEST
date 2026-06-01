@@ -1,0 +1,285 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Buy / Sell ASH — One‑Click</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; max-width:820px; margin:32px auto; padding:0 16px; color:#111; }
+    h1 { font-size:20px; margin-bottom:6px; }
+    .card { border:1px solid #eee; padding:14px; border-radius:8px; margin-top:12px; background:#fff; }
+    input, button, select { padding:10px; font-size:15px; margin:8px 0; width:100%; box-sizing:border-box; }
+    .row { display:flex; gap:8px; }
+    .row > * { flex:1; }
+    .small { font-size:13px; color:#666; }
+    .log { background:#f9f9f9; padding:10px; border-radius:6px; margin-top:12px; white-space:pre-wrap; font-family:monospace; max-height:220px; overflow:auto; }
+    .muted { color:#888; font-size:13px; }
+    a { color:#0b63d6; text-decoration:none; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+</head>
+<body>
+  <h1>One‑Click ASH (Buy / Sell)</h1>
+  <div class="muted">Connessione automatico MetaMask → Approve Max (una volta) → Buy / Sell</div>
+
+  <div class="card">
+    <div class="small">Network: <strong>Ethereum Mainnet</strong></div>
+    <div class="small">Swap contract: <a id="swapLink" href="#" target="_blank">0xE510...7de6</a></div>
+    <div class="small">ASH token: <a id="ashLink" href="#" target="_blank">0xd4FbB...</a></div>
+    <div class="small">USDC token: <a id="usdcLink" href="#" target="_blank">0xA0b8...</a></div>
+    <div style="margin-top:8px;">
+      <button id="connectBtn">Connetti Wallet</button>
+      <div id="addr" class="small"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Buy ASH</h3>
+    <div class="small">Inserisci quanto USDC vuoi spendere. La dApp calcola la stima ASH usando il contratto swap.</div>
+    <input id="buyUsdc" type="number" step="0.000001" placeholder="es. 1.0" />
+    <div class="row">
+      <button id="estimateBuy">Calcola stima</button>
+      <button id="doBuy">Compra ASH (one‑click)</button>
+    </div>
+    <div class="small">Stima ASH: <strong id="buyEstimate">—</strong></div>
+  </div>
+
+  <div class="card">
+    <h3>Sell ASH</h3>
+    <div class="small">Inserisci quanti ASH vuoi vendere. La dApp calcola la stima USDC restituita.</div>
+    <input id="sellAsh" type="number" step="0.000000000000000001" placeholder="es. 10.0" />
+    <div class="row">
+      <button id="estimateSell">Calcola stima</button>
+      <button id="doSell">Vendi ASH (one‑click)</button>
+    </div>
+    <div class="small">Stima USDC: <strong id="sellEstimate">—</strong></div>
+  </div>
+
+  <div class="card">
+    <h3>Contratto / Liquidity</h3>
+    <div class="small">Bilancio ASH nel contratto: <strong id="contractAsh">—</strong></div>
+    <div class="small">Bilancio USDC nel contratto: <strong id="contractUsdc">—</strong></div>
+    <div class="small">Rate (numerator/denominator): <strong id="rateVal">—</strong></div>
+    <button id="refresh">Aggiorna dati</button>
+  </div>
+
+  <div class="card">
+    <h3>Log</h3>
+    <div id="log" class="log"></div>
+  </div>
+
+<script>
+(async function(){
+  // CONFIG — DEFAULTS (Mainnet)
+  const SWAP_ADDRESS = "0xE5104018379973BA5a65b82bC7E876b766357de6";
+  const ASH_ADDRESS  = "0xd4FbB5E4Dd24C3F9A0F58Efa656A489D24E93BCd";
+  const USDC_ADDRESS = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eb48";
+  const ETHERSCAN_PREFIX = "https://etherscan.io";
+  const APPROVE_MAX = true; // approve MaxUint256 for UX
+
+  const provider = new ethers.providers.Web3Provider(window.ethereum, "any");
+  let signer = null;
+  let userAddr = null;
+
+  // ABIs
+  const ERC20_ABI = [
+    "function decimals() view returns (uint8)",
+    "function allowance(address, address) view returns (uint256)",
+    "function approve(address, uint256) returns (bool)",
+    "function balanceOf(address) view returns (uint256)"
+  ];
+  const SWAP_ABI = [
+    "function usdcToAsh(uint256) view returns (uint256)",
+    "function ashToUsdc(uint256) view returns (uint256)",
+    "function usdcDecimals() view returns (uint8)",
+    "function ashDecimals() view returns (uint8)",
+    "function numerator() view returns (uint256)",
+    "function denominator() view returns (uint256)",
+    "function buyASH(uint256) external",
+    "function sellASH(uint256) external"
+  ];
+
+  const logEl = document.getElementById('log');
+  function log(...args){ logEl.textContent += args.join(' ') + '\\n'; logEl.scrollTop = logEl.scrollHeight; }
+
+  // UI links
+  document.getElementById('swapLink').href = ETHERSCAN_PREFIX + '/address/' + SWAP_ADDRESS;
+  document.getElementById('ashLink').href = ETHERSCAN_PREFIX + '/token/' + ASH_ADDRESS;
+  document.getElementById('usdcLink').href = ETHERSCAN_PREFIX + '/token/' + USDC_ADDRESS;
+
+  async function ensureConnected() {
+    if (!window.ethereum) { alert("Installa MetaMask"); throw new Error("No wallet"); }
+    if (!signer) {
+      await provider.send("eth_requestAccounts", []);
+      signer = provider.getSigner();
+      userAddr = await signer.getAddress();
+      document.getElementById('addr').innerText = "Connesso: " + userAddr;
+      log("Connesso:", userAddr);
+    }
+    return signer;
+  }
+
+  async function readDecimals() {
+    const swap = new ethers.Contract(SWAP_ADDRESS, SWAP_ABI, provider);
+    try {
+      const uDec = await swap.usdcDecimals();
+      const aDec = await swap.ashDecimals();
+      return { uDec: Number(uDec), aDec: Number(aDec) };
+    } catch (e) {
+      // fallback defaults
+      return { uDec: 6, aDec: 18 };
+    }
+  }
+
+  async function refreshContractInfo() {
+    const swap = new ethers.Contract(SWAP_ADDRESS, SWAP_ABI, provider);
+    const ashToken = new ethers.Contract(ASH_ADDRESS, ERC20_ABI, provider);
+    const usdcToken = new ethers.Contract(USDC_ADDRESS, ERC20_ABI, provider);
+    try {
+      const [num, den] = await Promise.all([swap.numerator(), swap.denominator()]);
+      const { uDec, aDec } = await readDecimals();
+      const [ashBal, usdcBal] = await Promise.all([
+        ashToken.balanceOf(SWAP_ADDRESS),
+        usdcToken.balanceOf(SWAP_ADDRESS)
+      ]);
+      document.getElementById('rateVal').innerText = num.toString() + ' / ' + den.toString();
+      document.getElementById('contractAsh').innerText = ethers.utils.formatUnits(ashBal, aDec) + ' ASH';
+      document.getElementById('contractUsdc').innerText = ethers.utils.formatUnits(usdcBal, uDec) + ' USDC';
+      log("Dati aggiornati. ASH in contract:", ethers.utils.formatUnits(ashBal, aDec), "USDC in contract:", ethers.utils.formatUnits(usdcBal, uDec));
+    } catch (err) {
+      log("Errore refreshContractInfo:", err && err.message ? err.message : err);
+    }
+  }
+
+  async function estimateBuy(usdcHuman) {
+    try {
+      const { uDec, aDec } = await readDecimals();
+      const usdcUnits = ethers.utils.parseUnits(String(usdcHuman), uDec);
+      const swap = new ethers.Contract(SWAP_ADDRESS, SWAP_ABI, provider);
+      const ashUnits = await swap.usdcToAsh(usdcUnits);
+      return { ashUnits, ashHuman: ethers.utils.formatUnits(ashUnits, aDec) };
+    } catch (err) { throw err; }
+  }
+
+  async function estimateSell(ashHuman) {
+    try {
+      const { uDec, aDec } = await readDecimals();
+      const ashUnits = ethers.utils.parseUnits(String(ashHuman), aDec);
+      const swap = new ethers.Contract(SWAP_ADDRESS, SWAP_ABI, provider);
+      const usdcUnits = await swap.ashToUsdc(ashUnits);
+      return { usdcUnits, usdcHuman: ethers.utils.formatUnits(usdcUnits, uDec) };
+    } catch (err) { throw err; }
+  }
+
+  async function ensureApproveToken(tokenAddress, spender, amountUnits) {
+    await ensureConnected();
+    const token = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
+    const allowance = await token.allowance(userAddr, spender);
+    if (allowance.gte(amountUnits)) { log("Allowance sufficiente"); return; }
+    const approveAmount = APPROVE_MAX ? ethers.constants.MaxUint256 : amountUnits;
+    log("Invio approve per", tokenAddress, "spender", spender, "amount", APPROVE_MAX ? "MaxUint256" : amountUnits.toString());
+    const tx = await token.approve(spender, approveAmount);
+    log("Approve tx:", tx.hash);
+    await tx.wait();
+    log("Approve confermato.");
+  }
+
+  async function doBuy() {
+    try {
+      await ensureConnected();
+      const val = document.getElementById('buyUsdc').value;
+      if (!val || Number(val) <= 0) return alert("Inserisci importo USDC > 0");
+      const { uDec, aDec } = await readDecimals();
+      const usdcUnits = ethers.utils.parseUnits(String(val), uDec);
+
+      // stima
+      const swapProv = new ethers.Contract(SWAP_ADDRESS, SWAP_ABI, provider);
+      const ashExpected = await swapProv.usdcToAsh(usdcUnits);
+
+      // controllo liquidità
+      const ashTokenProv = new ethers.Contract(ASH_ADDRESS, ERC20_ABI, provider);
+      const ashBal = await ashTokenProv.balanceOf(SWAP_ADDRESS);
+      if (ashBal.lt(ashExpected)) { return alert("Il contratto non ha abbastanza ASH per questa operazione."); }
+
+      // approve USDC if needed
+      await ensureApproveToken(USDC_ADDRESS, SWAP_ADDRESS, usdcUnits);
+
+      // call buy
+      const swap = new ethers.Contract(SWAP_ADDRESS, SWAP_ABI, signer);
+      log("Invio buyASH(", usdcUnits.toString(), ") ...");
+      const tx = await swap.buyASH(usdcUnits, { gasLimit: 250000 });
+      log("buyASH tx:", tx.hash, "—", ETHERSCAN_PREFIX + "/tx/" + tx.hash);
+      await tx.wait();
+      log("buyASH confermato.");
+      await refreshContractInfo();
+    } catch (err) {
+      log("Errore buy:", err && err.message ? err.message : err);
+    }
+  }
+
+  async function doSell() {
+    try {
+      await ensureConnected();
+      const val = document.getElementById('sellAsh').value;
+      if (!val || Number(val) <= 0) return alert("Inserisci importo ASH > 0");
+      const { uDec, aDec } = await readDecimals();
+      const ashUnits = ethers.utils.parseUnits(String(val), aDec);
+
+      // stima
+      const swapProv = new ethers.Contract(SWAP_ADDRESS, SWAP_ABI, provider);
+      const usdcExpected = await swapProv.ashToUsdc(ashUnits);
+
+      // controllo liquidità USDC
+      const usdcProv = new ethers.Contract(USDC_ADDRESS, ERC20_ABI, provider);
+      const usdcBal = await usdcProv.balanceOf(SWAP_ADDRESS);
+      if (usdcBal.lt(usdcExpected)) { return alert("Il contratto non ha abbastanza USDC per questa vendita."); }
+
+      // approve ASH if needed
+      await ensureApproveToken(ASH_ADDRESS, SWAP_ADDRESS, ashUnits);
+
+      // call sell
+      const swap = new ethers.Contract(SWAP_ADDRESS, SWAP_ABI, signer);
+      log("Invio sellASH(", ashUnits.toString(), ") ...");
+      const tx = await swap.sellASH(ashUnits, { gasLimit: 250000 });
+      log("sellASH tx:", tx.hash, "—", ETHERSCAN_PREFIX + "/tx/" + tx.hash);
+      await tx.wait();
+      log("sellASH confermato.");
+      await refreshContractInfo();
+    } catch (err) {
+      log("Errore sell:", err && err.message ? err.message : err);
+    }
+  }
+
+  // UI wiring
+  document.getElementById('connectBtn').addEventListener('click', async ()=> {
+    try { await ensureConnected(); await refreshContractInfo(); } catch(e){ log(e && e.message ? e.message : e); }
+  });
+  document.getElementById('refresh').addEventListener('click', refreshContractInfo);
+  document.getElementById('estimateBuy').addEventListener('click', async ()=>{
+    const v = document.getElementById('buyUsdc').value;
+    if (!v || Number(v)<=0) return alert("Inserisci importo USDC");
+    try {
+      const est = await estimateBuy(v);
+      document.getElementById('buyEstimate').innerText = est.ashHuman + ' ASH';
+      log("Stima buy:", est.ashHuman, "ASH");
+    } catch (e) { log("Estimate buy errore:", e && e.message ? e.message : e); alert("Errore stima"); }
+  });
+  document.getElementById('doBuy').addEventListener('click', doBuy);
+
+  document.getElementById('estimateSell').addEventListener('click', async ()=>{
+    const v = document.getElementById('sellAsh').value;
+    if (!v || Number(v)<=0) return alert("Inserisci importo ASH");
+    try {
+      const est = await estimateSell(v);
+      document.getElementById('sellEstimate').innerText = est.usdcHuman + ' USDC';
+      log("Stima sell:", est.usdcHuman, "USDC");
+    } catch (e) { log("Estimate sell errore:", e && e.message ? e.message : e); alert("Errore stima"); }
+  });
+  document.getElementById('doSell').addEventListener('click', doSell);
+
+  // initial contract info load (no wallet)
+  try { await refreshContractInfo(); } catch(e){ /* ignore */ }
+})();
+</script>
+</body>
+</html>
